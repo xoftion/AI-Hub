@@ -271,4 +271,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-Built with ❤️ by the AI Hub team. Star ⭐ this repository if you find it helpful!
+Built with ❤️ by the XOFTION Team. Star ⭐ this repository if you find it helpful!
