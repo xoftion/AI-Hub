@@ -1,86 +1,72 @@
-const ELEVENLABS_API_URL = "https://api.elevenlabs.io/v1";
+import { AIRequest, AIResponse } from '@shared/schema';
 
-export interface TextToSpeechRequest {
-  text: string;
-  voiceId?: string;
-  modelId?: string;
-}
+export class ElevenLabsService {
+  private apiKey: string;
+  private baseUrl = 'https://api.elevenlabs.io/v1';
 
-export interface TextToSpeechResponse {
-  audioUrl: string;
-  responseTime: number;
-}
+  constructor() {
+    this.apiKey = process.env.ELEVENLABS_API_KEY || '';
+  }
 
-export async function textToSpeechWithElevenLabs(request: TextToSpeechRequest): Promise<TextToSpeechResponse> {
-  const startTime = Date.now();
-  
-  try {
-    const voiceId = request.voiceId || "21m00Tcm4TlvDq8ikWAM"; // Default voice
-    const response = await fetch(`${ELEVENLABS_API_URL}/text-to-speech/${voiceId}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "xi-api-key": process.env.ELEVENLABS_API_KEY || process.env.ELEVENLABS_API_KEY_ENV_VAR || ""
-      },
-      body: JSON.stringify({
-        text: request.text,
-        model_id: request.modelId || "eleven_monolingual_v1",
-        voice_settings: {
-          stability: 0.5,
-          similarity_boost: 0.5
-        }
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error(`ElevenLabs API returned ${response.status}: ${response.statusText}`);
-    }
-
-    const audioBuffer = await response.arrayBuffer();
-    const responseTime = Date.now() - startTime;
+  async processRequest(request: AIRequest): Promise<AIResponse> {
+    const startTime = Date.now();
     
-    // Convert audio buffer to base64 for transmission
-    const audioBase64 = Buffer.from(audioBuffer).toString('base64');
-    const audioUrl = `data:audio/mpeg;base64,${audioBase64}`;
+    try {
+      const voiceId = request.model || 'pNInz6obpgDQGcFmaJgB'; // Default voice
+      
+      const response = await fetch(`${this.baseUrl}/text-to-speech/${voiceId}`, {
+        method: 'POST',
+        headers: {
+          'Accept': 'audio/mpeg',
+          'Content-Type': 'application/json',
+          'xi-api-key': this.apiKey,
+        },
+        body: JSON.stringify({
+          text: request.prompt,
+          model_id: 'eleven_monolingual_v1',
+          voice_settings: {
+            stability: 0.5,
+            similarity_boost: 0.5,
+          },
+        }),
+      });
 
-    return {
-      audioUrl,
-      responseTime,
-    };
-  } catch (error) {
-    throw new Error(`ElevenLabs API Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
-  }
-}
-
-export async function getElevenLabsVoices(): Promise<any[]> {
-  try {
-    const response = await fetch(`${ELEVENLABS_API_URL}/voices`, {
-      headers: {
-        "xi-api-key": process.env.ELEVENLABS_API_KEY || process.env.ELEVENLABS_API_KEY_ENV_VAR || ""
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
       }
-    });
 
-    if (!response.ok) {
-      throw new Error(`ElevenLabs API returned ${response.status}: ${response.statusText}`);
+      const endTime = Date.now();
+      const responseTime = endTime - startTime;
+
+      // Convert audio to base64 for response
+      const audioBuffer = await response.arrayBuffer();
+      const audioBase64 = Buffer.from(audioBuffer).toString('base64');
+
+      return {
+        content: `Audio generated successfully. Length: ${audioBuffer.byteLength} bytes. Base64: data:audio/mpeg;base64,${audioBase64.substring(0, 100)}...`,
+        usage: {
+          promptTokens: request.prompt.length,
+          completionTokens: Math.ceil(audioBuffer.byteLength / 1000), // Approximate
+          totalTokens: request.prompt.length + Math.ceil(audioBuffer.byteLength / 1000),
+        },
+        responseTime,
+        model: voiceId,
+      };
+    } catch (error: any) {
+      throw new Error(`ElevenLabs API Error: ${error.message}`);
     }
-
-    const data = await response.json();
-    return data.voices || [];
-  } catch (error) {
-    throw new Error(`ElevenLabs Voices API Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
-}
 
-export async function checkElevenLabsHealth(): Promise<boolean> {
-  try {
-    const response = await fetch(`${ELEVENLABS_API_URL}/voices`, {
-      headers: {
-        "xi-api-key": process.env.ELEVENLABS_API_KEY || process.env.ELEVENLABS_API_KEY_ENV_VAR || ""
-      }
-    });
-
-    return response.ok;
-  } catch (error) {
-    return false;
+  async checkHealth(): Promise<boolean> {
+    try {
+      const response = await fetch(`${this.baseUrl}/voices`, {
+        headers: {
+          'xi-api-key': this.apiKey,
+        },
+      });
+      return response.ok;
+    } catch {
+      return false;
+    }
   }
 }

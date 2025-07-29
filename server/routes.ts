@@ -6,13 +6,23 @@ import { z } from "zod";
 import { insertApiRequestSchema, AIRequest } from "@shared/schema";
 
 // AI Service imports
-import { processOpenAIRequest, analyzeImageWithOpenAI, generateImageWithOpenAI, checkOpenAIHealth } from "./services/openai";
-import { processGeminiRequest, analyzeImageWithGemini, analyzeSentimentWithGemini, checkGeminiHealth } from "./services/gemini";
-import { processDeepSeekRequest, processDeepSeekCodeRequest, checkDeepSeekHealth } from "./services/deepseek";
-import { textToSpeechWithElevenLabs, getElevenLabsVoices, checkElevenLabsHealth } from "./services/elevenlabs";
+import { OpenAIService } from "./services/openai";
+import { GeminiService } from "./services/gemini";
+import { DeepSeekService } from "./services/deepseek";
+import { ElevenLabsService } from "./services/elevenlabs";
+import { AnthropicService } from "./services/anthropic";
+import { PerplexityService } from "./services/perplexity";
+
+// Initialize service instances
+const openaiService = new OpenAIService();
+const geminiService = new GeminiService();
+const deepseekService = new DeepSeekService();
+const elevenlabsService = new ElevenLabsService();
+const anthropicService = new AnthropicService();
+const perplexityService = new PerplexityService();
 
 const aiRequestSchema = z.object({
-  provider: z.enum(["openai", "gemini", "deepseek", "elevenlabs"]),
+  provider: z.enum(["openai", "gemini", "deepseek", "elevenlabs", "anthropic", "perplexity"]),
   model: z.string(),
   prompt: z.string(),
   parameters: z.object({
@@ -33,10 +43,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get('/api/health', async (req, res) => {
     try {
       const providers = {
-        openai: await checkOpenAIHealth(),
-        gemini: await checkGeminiHealth(),
-        deepseek: await checkDeepSeekHealth(),
-        elevenlabs: await checkElevenLabsHealth(),
+        openai: await openaiService.checkHealth(),
+        gemini: await geminiService.checkHealth(),
+        deepseek: await deepseekService.checkHealth(),
+        elevenlabs: await elevenlabsService.checkHealth(),
+        anthropic: await anthropicService.checkHealth(),
+        perplexity: await perplexityService.checkHealth(),
       };
 
       const allHealthy = Object.values(providers).every(status => status);
@@ -80,7 +92,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Get recent API requests
+  // Get recent requests
   app.get('/api/requests/recent', async (req, res) => {
     try {
       const limit = parseInt(req.query.limit as string) || 10;
@@ -94,164 +106,130 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Process AI requests
+  // Main AI processing endpoint
   app.post('/api/ai/process', async (req, res) => {
-    const startTime = Date.now();
-    
     try {
       const validatedRequest = aiRequestSchema.parse(req.body);
-      let response;
-      let requestType = 'text_completion';
-
-      // Route to appropriate AI service
+      const startTime = Date.now();
+      
+      let service;
       switch (validatedRequest.provider) {
         case 'openai':
-          response = await processOpenAIRequest(validatedRequest);
+          service = openaiService;
           break;
         case 'gemini':
-          response = await processGeminiRequest(validatedRequest);
+          service = geminiService;
           break;
         case 'deepseek':
-          response = await processDeepSeekRequest(validatedRequest);
-          requestType = validatedRequest.model.includes('coder') ? 'code_completion' : 'text_completion';
+          service = deepseekService;
           break;
         case 'elevenlabs':
-          const ttsResponse = await textToSpeechWithElevenLabs({ 
-            text: validatedRequest.prompt,
-            modelId: validatedRequest.model 
-          });
-          response = {
-            content: ttsResponse.audioUrl,
-            usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
-            responseTime: ttsResponse.responseTime,
-            model: validatedRequest.model,
-          };
-          requestType = 'text_to_speech';
+          service = elevenlabsService;
+          break;
+        case 'anthropic':
+          service = anthropicService;
+          break;
+        case 'perplexity':
+          service = perplexityService;
           break;
         default:
-          throw new Error(`Unsupported provider: ${validatedRequest.provider}`);
+          return res.status(400).json({ error: 'Unsupported provider' });
       }
 
+      // Check rate limiting (if user is authenticated)
+      const userId = req.headers['x-user-id'] as string;
+      if (userId) {
+        const canProceed = await storage.checkRateLimit(userId, validatedRequest.provider);
+        if (!canProceed) {
+          return res.status(429).json({ 
+            error: 'Rate limit exceeded',
+            message: 'You have exceeded your rate limit. Please upgrade to premium for higher limits.'
+          });
+        }
+      }
+
+      const response = await service.processRequest(validatedRequest);
+      
       // Log the request
       await storage.createApiRequest({
-        provider: validatedRequest.provider,
+        userId: userId || null,
+        provider: validatedRequest.provider as any,
         model: validatedRequest.model,
-        requestType,
-        status: 'success',
+        prompt: validatedRequest.prompt,
+        response: response.content,
+        tokens: response.usage.totalTokens,
+        cost: response.cost || '0',
         responseTime: response.responseTime,
-        tokenCount: response.usage.totalTokens,
-        metadata: {
-          parameters: validatedRequest.parameters,
-          promptLength: validatedRequest.prompt.length,
-        },
+        status: 'success',
+        errorMessage: null,
       });
+
+      // Update rate limiting
+      if (userId) {
+        await storage.incrementRateLimit(userId, validatedRequest.provider);
+      }
 
       res.json(response);
     } catch (error) {
-      const responseTime = Date.now() - startTime;
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       
       // Log failed request
-      if (req.body.provider) {
+      try {
+        const userId = req.headers['x-user-id'] as string;
         await storage.createApiRequest({
-          provider: req.body.provider,
+          userId: userId || null,
+          provider: req.body.provider as any,
           model: req.body.model || 'unknown',
-          requestType: 'text_completion',
+          prompt: req.body.prompt || '',
+          response: null,
+          tokens: 0,
+          cost: '0',
+          responseTime: Date.now() - (req as any).startTime || 0,
           status: 'error',
-          responseTime,
-          tokenCount: 0,
-          metadata: { error: error instanceof Error ? error.message : 'Unknown error' },
+          errorMessage,
         });
+      } catch (logError) {
+        console.error('Failed to log error request:', logError);
       }
 
       res.status(500).json({ 
         error: 'AI processing failed',
+        message: errorMessage
+      });
+    }
+  });
+
+  // User stats endpoint
+  app.get('/api/user/stats', async (req, res) => {
+    try {
+      const userId = req.headers['x-user-id'] as string;
+      if (!userId) {
+        return res.status(401).json({ error: 'User not authenticated' });
+      }
+
+      const stats = await storage.getUserStats(userId);
+      res.json(stats);
+    } catch (error) {
+      res.status(500).json({ 
+        error: 'Failed to get user stats',
         message: error instanceof Error ? error.message : 'Unknown error'
       });
     }
   });
 
-  // Image analysis endpoint
-  app.post('/api/ai/analyze-image', async (req, res) => {
-    const startTime = Date.now();
-    
+  // Upgrade user to premium
+  app.post('/api/user/upgrade', async (req, res) => {
     try {
-      const { provider, base64Image, prompt } = req.body;
-      
-      if (!provider || !base64Image) {
-        return res.status(400).json({ error: 'Provider and base64Image are required' });
+      const userId = req.headers['x-user-id'] as string;
+      if (!userId) {
+        return res.status(401).json({ error: 'User not authenticated' });
       }
 
-      let response;
-      
-      switch (provider) {
-        case 'openai':
-          response = await analyzeImageWithOpenAI(base64Image, prompt);
-          break;
-        case 'gemini':
-          response = await analyzeImageWithGemini(base64Image, prompt);
-          break;
-        default:
-          throw new Error(`Image analysis not supported for provider: ${provider}`);
-      }
-
-      // Log the request
-      await storage.createApiRequest({
-        provider,
-        model: response.model,
-        requestType: 'image_analysis',
-        status: 'success',
-        responseTime: response.responseTime,
-        tokenCount: response.usage.totalTokens,
-        metadata: { prompt },
-      });
-
-      res.json(response);
-    } catch (error) {
-      const responseTime = Date.now() - startTime;
-      
-      if (req.body.provider) {
-        await storage.createApiRequest({
-          provider: req.body.provider,
-          model: 'vision',
-          requestType: 'image_analysis',
-          status: 'error',
-          responseTime,
-          tokenCount: 0,
-          metadata: { error: error instanceof Error ? error.message : 'Unknown error' },
-        });
-      }
-
-      res.status(500).json({ 
-        error: 'Image analysis failed',
-        message: error instanceof Error ? error.message : 'Unknown error'
-      });
-    }
-  });
-
-  // Get ElevenLabs voices
-  app.get('/api/elevenlabs/voices', async (req, res) => {
-    try {
-      const voices = await getElevenLabsVoices();
-      res.json(voices);
+      const user = await storage.upgradeUser(userId);
+      res.json(user);
     } catch (error) {
       res.status(500).json({ 
-        error: 'Failed to get voices',
-        message: error instanceof Error ? error.message : 'Unknown error'
-      });
-    }
-  });
-
-  // Update provider health status (internal endpoint)
-  app.post('/api/providers/:provider/health', async (req, res) => {
-    try {
-      const { provider } = req.params;
-      const { status } = req.body;
-      
-      await storage.updateProviderStatus(provider, status);
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ 
-        error: 'Failed to update provider status',
+        error: 'Failed to upgrade user',
         message: error instanceof Error ? error.message : 'Unknown error'
       });
     }
