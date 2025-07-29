@@ -250,7 +250,7 @@ The application uses PostgreSQL with Drizzle ORM. For production deployment:
 
 ## 📄 License
 
-This project is licensed under the XOFTION License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the XOFTION License - see the [LICENSE](https://xoftion.onrender.com/) file for details.
 
 ## 🆘 Support
 
